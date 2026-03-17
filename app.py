@@ -6,69 +6,60 @@ st.set_page_config(page_title="Gestion Conges", layout="wide")
 
 st.title("📋 Gestion des Congés et Affectations")
 
-# Connexion à Google Sheets
+# Connexion avec le Service Account configuré dans les Secrets
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_data():
-    return conn.read(ttl="0")
+    # On lit la feuille principale (Sheet1)
+    data = conn.read(worksheet="Sheet1", ttl="0")
+    # On nettoie les espaces invisibles dans les noms de colonnes
+    data.columns = data.columns.str.strip()
+    return data
 
 df = load_data()
 
-# --- AFFICHAGE PRINCIPAL ---
 st.subheader("Tableau de bord des employés")
-# On affiche le tableau avec les noms de colonnes propres
 st.dataframe(df, use_container_width=True)
 
 st.divider()
 
-# --- FORMULAIRE DE MISE À JOUR ---
-st.subheader("⚙️ Affecter un congé ou changer de service")
-
 with st.form("update_form"):
-    # On sélectionne par matricule pour être précis
-    liste_employes = df['matricule'].astype(str) + " - " + df['nom'] + " " + df['prénom']
+    # Récupération sécurisée du prénom (avec ou sans accent)
+    col_prenom = 'prénom' if 'prénom' in df.columns else 'prenom'
+    liste_employes = df['matricule'].astype(str) + " - " + df['nom'] + " " + df[col_prenom]
+    
     choix = st.selectbox("Sélectionner l'employé", options=liste_employes)
     matricule_sel = choix.split(" - ")[0]
 
-    col1, col2, col3 = st.columns(3)
-
+    col1, col2 = st.columns(2)
     with col1:
-        st.markdown("**Dates de Congés**")
-        d_debut = st.date_input("Date début")
-        d_fin = st.date_input("Date fin")
-        d_reprise = st.date_input("Date reprise")
+        d_debut = st.date_input("Date début congé")
+        d_fin = st.date_input("Date fin congé")
+        service_aff = st.text_input("Service affecté")
 
     with col2:
-        st.markdown("**Calculs**")
-        duree = st.number_input("Durée (jours)", min_value=0)
-        nbr_conges = st.number_input("Nombre de congés pris", min_value=0)
-        nouveau_reliquat = st.number_input("Nouveau reliquat", min_value=0)
+        reliquat = st.number_input("Reliquat des congés", min_value=0)
+        duree = st.number_input("durréenbr des congés", min_value=0)
 
-    with col3:
-        st.markdown("**Organisation**")
-        nouveau_service = st.text_input("Nouveau service affecté")
-        nouvelle_fonction = st.text_input("Nouvelle fonction (si besoin)")
-
-    submit = st.form_submit_button("Enregistrer les modifications")
+    submit = st.form_submit_button("Sauvegarder les modifications")
 
     if submit:
-        # Trouver l'index de la ligne correspondant au matricule
-        idx = df.index[df['matricule'].astype(str) == matricule_sel].tolist()[0]
+        new_df = df.copy()
+        idx = new_df.index[new_df['matricule'].astype(str) == matricule_sel].tolist()[0]
 
-        # Mise à jour des valeurs dans le DataFrame
-        df.at[idx, 'date début congé'] = str(d_debut)
-        df.at[idx, 'date fin congé'] = str(d_fin)
-        df.at[idx, 'date reprise'] = str(d_reprise)
-        df.at[idx, 'durée'] = duree
-        df.at[idx, 'nbr des congés'] = nbr_conges
-        df.at[idx, 'reliquat des congés'] = nouveau_reliquat
-        
-        if nouveau_service:
-            df.at[idx, 'service_affecté'] = nouveau_service
-        if nouvelle_fonction:
-            df.at[idx, 'fonction'] = nouvelle_fonction
+        # Mise à jour des colonnes exactes
+        new_df.at[idx, 'date début congé'] = str(d_debut)
+        new_df.at[idx, 'date fin congé'] = str(d_fin)
+        new_df.at[idx, 'reliquat des congés'] = reliquat
+        new_df.at[idx, 'durréenbr des congés'] = duree
+        if service_aff:
+            new_df.at[idx, 'service affecté'] = service_aff
 
-        # Sauvegarde immédiate vers Google Sheets
-        conn.update(data=df)
-        st.success(f"Mise à jour réussie pour le matricule {matricule_sel} !")
-        st.rerun()
+        try:
+            # Maintenant l'opération est supportée grâce au Service Account !
+            conn.update(worksheet="Sheet1", data=new_df)
+            st.success(f"✅ Enregistré pour le matricule {matricule_sel} !")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Erreur de sauvegarde : {e}")
