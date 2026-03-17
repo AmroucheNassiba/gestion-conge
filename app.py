@@ -4,98 +4,127 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 # Configuration de la page
-st.set_page_config(page_title="Gestion Congés", layout="wide")
+st.set_page_config(page_title="HR Management System", layout="wide", page_icon="🏢")
 
-st.title("📋 Système de Gestion des Congés")
+# --- FONCTIONS CŒUR MÉTIER ---
+def calculate_leave_metrics(d_start, d_end):
+    """Calcule la durée et la date de reprise automatiquement."""
+    duration = (d_end - d_start).days
+    return max(0, duration), d_end + timedelta(days=1)
 
+def get_status_badge(reliquat):
+    """Retourne un indicateur visuel du solde de l'employé."""
+    if reliquat <= 0:
+        return "🔴 Solde Épuisé"
+    elif reliquat < 5:
+        return "🟠 Solde Critique"
+    return "🟢 Solde OK"
+
+# --- CHARGEMENT DES DONNÉES ---
 try:
-    # Connexion à Google Sheets
     conn = st.connection("gsheets", type=GSheetsConnection)
 
-    def load_data():
-        # Lecture de la feuille
+    @st.cache_data(ttl=0)
+    def load_cleaned_data():
         data = conn.read(worksheet="Sheet1", ttl=0)
-        # Nettoyage des espaces dans les noms de colonnes
-        data.columns = [str(c).strip() for c in data.columns]
+        data.columns = [str(c).strip().lower() for c in data.columns]
         return data
 
-    df = load_data()
+    df = load_cleaned_data()
+except Exception as e:
+    st.error(f"Erreur de connexion au référentiel : {e}")
+    st.stop()
 
-    # Affichage du tableau de bord
-    st.subheader("📊 Tableau des Employés")
+# --- INTERFACE PRINCIPALE ---
+st.title("🏢 Système de Gestion des Ressources Humaines")
+st.markdown(f"**Dernière mise à jour :** {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+
+# Vue d'ensemble avec filtres
+with st.expander("🔍 Consulter la base de données employés", expanded=False):
     st.dataframe(df, use_container_width=True, hide_index=True)
 
-    st.divider()
+st.divider()
 
-    # --- FORMULAIRE D'AFFECTATION ---
-    st.subheader("✍️ Affectation de Congé")
-    
-    # Préparation de la liste de sélection
-    col_nom = 'nom' if 'nom' in df.columns else df.columns[1]
-    liste_employes = df['matricule'].astype(str) + " - " + df[col_nom].astype(str)
-    
-    choix = st.selectbox("Sélectionnez un employé pour mettre à jour son dossier", options=liste_employes)
+# --- ZONE D'ACTION ---
+col_form, col_summary = st.columns([2, 1])
 
-    if choix:
-        matricule_sel = choix.split(" - ")[0]
-        # Extraction des infos de l'employé sélectionné
-        emp_row = df[df['matricule'].astype(str) == matricule_sel].iloc[0]
+with col_form:
+    st.subheader("📝 Mise à jour du dossier employé")
+    
+    # Sélections intelligentes
+    noms = df['nom'].tolist()
+    matricules = df['matricule'].astype(str).tolist()
+    liste_options = [f"{m} - {n}" for m, n in zip(matricules, noms)]
+    
+    selection = st.selectbox("Rechercher un collaborateur", options=[""] + liste_options)
+
+    if selection:
+        m_id = selection.split(" - ")[0]
+        emp_data = df[df['matricule'].astype(str) == m_id].iloc[0]
         
-        # Récupération sécurisée du reliquat
-        col_rel = 'reliquat des congés'
-        reliquat_actuel = float(emp_row[col_rel]) if col_rel in emp_row else 0
+        # Extraction sécurisée des colonnes sensibles
+        rel_key = 'reliquat des congés'
+        solde_actuel = float(emp_data.get(rel_key, 0))
 
-        with st.form("form_update"):
-            col1, col2 = st.columns(2)
+        with st.form("pro_update_form"):
+            st.markdown(f"### Dossier : {emp_data['nom']}")
             
-            with col1:
-                st.markdown("**Dates & Durée**")
-                d_debut = st.date_input("Date début congé", datetime.now())
-                d_fin = st.date_input("Date fin congé", datetime.now() + timedelta(days=1))
+            c1, c2 = st.columns(2)
+            with c1:
+                d_start = st.date_input("Début du congé", datetime.now())
+                d_end = st.date_input("Fin du congé", datetime.now() + timedelta(days=1))
                 
-                # --- CALCULS AUTOMATIQUES ---
-                duree = (d_fin - d_debut).days
-                if duree < 0: duree = 0
-                date_reprise = d_fin + timedelta(days=1)
+                # Calcul temps réel (prévisualisation)
+                duree, reprise = calculate_leave_metrics(d_start, d_end)
+                st.write(f"**Analyse :** {duree} jours demandés.")
+            
+            with c2:
+                # Logique de décision intelligente
+                current_service = emp_data.get('service affecté', "Non défini")
                 
-                st.info(f"📏 Durée : {duree} jours | 📅 Reprise : {date_reprise.strftime('%d/%m/%Y')}")
-
-            with col2:
-                st.markdown("**Statut & Service**")
-                nouveau_service = emp_row.get('service affecté', "")
-                remarque = ""
-                
-                # LOGIQUE MÉTIER : Reliquat épuisé
-                if reliquat_actuel <= 0:
-                    st.error("⚠️ Reliquat épuisé ! Affectation vers un nouveau service requise.")
-                    nouveau_service = st.text_input("Nouveau service d'affectation", value="")
-                    remarque = "Affectation suite à épuisement de reliquat"
+                if solde_actuel <= 0:
+                    st.warning(f"⚠️ {get_status_badge(solde_actuel)}")
+                    target_service = st.text_input("Réaffectation obligatoire vers :", placeholder="Saisir nouveau service")
+                    remarque = "RÉAFFECTATION SYSTÉMATIQUE : Solde de congés nul."
                 else:
-                    nouveau_service = st.text_input("Service affecté", value=nouveau_service)
-                    st.success(f"✅ Reliquat disponible : {reliquat_actuel} jours")
+                    st.info(f"✅ {get_status_badge(solde_actuel)} ({solde_actuel}j)")
+                    target_service = st.text_input("Service affecté", value=current_service)
+                    remarque = st.text_input("Remarque / Note interne", value="")
 
-            # Bouton de validation
-            if st.form_submit_button("💾 Enregistrer les modifications"):
-                # Localisation de la ligne dans le DataFrame d'origine
-                idx = df.index[df['matricule'].astype(str) == matricule_sel].tolist()[0]
-                
-                # Mise à jour des valeurs calculées
-                df.at[idx, 'date début congé'] = str(d_debut)
-                df.at[idx, 'date fin congé'] = str(d_fin)
-                df.at[idx, 'date reprise'] = str(date_reprise)
-                df.at[idx, 'durrée'] = duree
-                df.at[idx, 'reliquat des congés'] = reliquat_actuel - duree
-                df.at[idx, 'service affecté'] = nouveau_service
-                
-                # Sauvegarde via la connexion Google Sheets
-                try:
-                    conn.update(worksheet="Sheet1", data=df)
-                    st.success(f"Mise à jour réussie pour {emp_row[col_nom]} !")
-                    st.cache_data.clear()
-                    st.rerun()
-                except Exception as save_error:
-                    st.error(f"Erreur lors de la sauvegarde : {save_error}")
+            # Validation finale
+            if st.form_submit_button("Confirmer la mise à jour"):
+                if d_start > d_end:
+                    st.error("Erreur critique : La date de début ne peut pas être après la date de fin.")
+                elif solde_actuel <= 0 and not target_service:
+                    st.error("Le changement de service est obligatoire pour les soldes nuls.")
+                else:
+                    # Traitement de la donnée
+                    idx = df.index[df['matricule'].astype(str) == m_id].tolist()[0]
+                    
+                    df.at[idx, 'date début congé'] = str(d_start)
+                    df.at[idx, 'date fin congé'] = str(d_end)
+                    df.at[idx, 'date reprise'] = str(reprise)
+                    df.at[idx, 'durrée'] = duree
+                    df.at[idx, 'reliquat des congés'] = solde_actuel - duree
+                    df.at[idx, 'service affecté'] = target_service
+                    
+                    # Trçabilité (Audit)
+                    df.at[idx, 'derniere_maj'] = datetime.now().strftime('%Y-%m-%d %H:%M')
 
-except Exception as e:
-    st.error("🚨 Une erreur est survenue lors du chargement des données.")
-    st.exception(e)
+                    with st.spinner("Synchronisation avec Google Cloud..."):
+                        conn.update(worksheet="Sheet1", data=df)
+                        st.success(f"Dossier de {emp_data['nom']} synchronisé avec succès.")
+                        st.cache_data.clear()
+                        st.rerun()
+
+with col_summary:
+    st.subheader("ℹ️ Aide au calcul")
+    if selection:
+        st.metric("Solde actuel", f"{solde_actuel} j")
+        if solde_actuel <= 0:
+            st.error("L'employé a épuisé ses droits. Le système impose une réaffectation de service conformément à la politique interne.")
+        else:
+            nouveau_solde_virtuel = solde_actuel - duree
+            st.metric("Solde après validation", f"{nouveau_solde_virtuel} j", delta=-duree)
+    else:
+        st.info("Sélectionnez un employé pour voir l'analyse prédictive de son solde.")
