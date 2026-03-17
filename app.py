@@ -26,7 +26,7 @@ st.subheader("⚙️ Affecter un congé ou changer de service")
 
 with st.form("update_form"):
     # On sélectionne par matricule pour être précis
-    liste_employes = df['matricule'].astype(str) + " - " + df['nom'] + " " + df['prenom']
+    liste_employes = df['matricule'].astype(str) + " - " + df['nom'] + " " + df['prénom']
     choix = st.selectbox("Sélectionner l'employé", options=liste_employes)
     matricule_sel = choix.split(" - ")[0]
 
@@ -56,15 +56,15 @@ with st.form("update_form"):
         idx = df.index[df['matricule'].astype(str) == matricule_sel].tolist()[0]
 
         # Mise à jour des valeurs dans le DataFrame
-        df.at[idx, 'date_debut'] = str(d_debut)
-        df.at[idx, 'date_fin'] = str(d_fin)
-        df.at[idx, 'date_reprise'] = str(d_reprise)
-        df.at[idx, 'duree'] = duree
-        df.at[idx, 'nbr_conges'] = nbr_conges
-        df.at[idx, 'reliquat'] = nouveau_reliquat
+        df.at[idx, 'date début congé'] = str(d_debut)
+        df.at[idx, 'date fin congé'] = str(d_fin)
+        df.at[idx, 'date reprise'] = str(d_reprise)
+        df.at[idx, 'durée'] = duree
+        df.at[idx, 'nbr des congés'] = nbr_conges
+        df.at[idx, 'reliquat des congés'] = nouveau_reliquat
         
         if nouveau_service:
-            df.at[idx, 'service_affecte'] = nouveau_service
+            df.at[idx, 'service_affecté'] = nouveau_service
         if nouvelle_fonction:
             df.at[idx, 'fonction'] = nouvelle_fonction
 
