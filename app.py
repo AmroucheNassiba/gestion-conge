@@ -88,7 +88,7 @@ try:
                 df.at[idx, 'date début congé'] = str(d_debut)
                 df.at[idx, 'date fin congé'] = str(d_fin)
                 df.at[idx, 'date reprise'] = str(date_reprise)
-                df.at[idx, 'durréenbr des congés'] = duree
+                df.at[idx, 'durrée'] = duree
                 df.at[idx, 'reliquat des congés'] = reliquat_actuel - duree
                 df.at[idx, 'service affecté'] = nouveau_service
                 
