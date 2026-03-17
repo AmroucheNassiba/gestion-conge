@@ -6,47 +6,39 @@ from datetime import datetime, timedelta
 # Configuration de la page
 st.set_page_config(page_title="Gestion Congés", layout="wide")
 
-# Forcer le mode clair via CSS
-st.markdown("""
-    <style>
-    .stApp { background-color: white; color: black; }
-    [data-testid="stHeader"] { background-color: white; }
-    </style>
-    """, unsafe_allow_html=True)
-
 st.title("📋 Système de Gestion des Congés")
 
 try:
-    # Connexion
+    # Connexion à Google Sheets
     conn = st.connection("gsheets", type=GSheetsConnection)
 
     def load_data():
-        # On lit la feuille
+        # Lecture de la feuille
         data = conn.read(worksheet="Sheet1", ttl=0)
-        # Nettoyage automatique des noms de colonnes
+        # Nettoyage des espaces dans les noms de colonnes
         data.columns = [str(c).strip() for c in data.columns]
         return data
 
     df = load_data()
 
-    # Affichage du tableau
-    st.subheader("Tableau des Employés")
-    st.dataframe(df, use_container_width=True)
+    # Affichage du tableau de bord
+    st.subheader("📊 Tableau des Employés")
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
     st.divider()
 
-    # --- FORMULAIRE ---
-    st.subheader("Affectation de Congé")
+    # --- FORMULAIRE D'AFFECTATION ---
+    st.subheader("✍️ Affectation de Congé")
     
-    # On gère l'affichage pour la sélection
+    # Préparation de la liste de sélection
     col_nom = 'nom' if 'nom' in df.columns else df.columns[1]
     liste_employes = df['matricule'].astype(str) + " - " + df[col_nom].astype(str)
     
-    choix = st.selectbox("Sélectionnez un employé", options=liste_employes)
+    choix = st.selectbox("Sélectionnez un employé pour mettre à jour son dossier", options=liste_employes)
 
     if choix:
         matricule_sel = choix.split(" - ")[0]
-        # Extraire les infos de l'employé
+        # Extraction des infos de l'employé sélectionné
         emp_row = df[df['matricule'].astype(str) == matricule_sel].iloc[0]
         
         # Récupération sécurisée du reliquat
@@ -57,34 +49,37 @@ try:
             col1, col2 = st.columns(2)
             
             with col1:
+                st.markdown("**Dates & Durée**")
                 d_debut = st.date_input("Date début congé", datetime.now())
                 d_fin = st.date_input("Date fin congé", datetime.now() + timedelta(days=1))
                 
-                # Calculs automatiques
+                # --- CALCULS AUTOMATIQUES ---
                 duree = (d_fin - d_debut).days
+                if duree < 0: duree = 0
                 date_reprise = d_fin + timedelta(days=1)
                 
-                st.write(f"**Durée calculée :** {duree} jours")
-                st.write(f"**Date reprise automatique :** {date_reprise.strftime('%d/%m/%Y')}")
+                st.info(f"📏 Durée : {duree} jours | 📅 Reprise : {date_reprise.strftime('%d/%m/%Y')}")
 
             with col2:
-                # Logique Reliquat / Changement de service
+                st.markdown("**Statut & Service**")
                 nouveau_service = emp_row.get('service affecté', "")
                 remarque = ""
                 
+                # LOGIQUE MÉTIER : Reliquat épuisé
                 if reliquat_actuel <= 0:
-                    st.error("⚠️ Reliquat épuisé ! Veuillez affecter à un autre service.")
+                    st.error("⚠️ Reliquat épuisé ! Affectation vers un nouveau service requise.")
                     nouveau_service = st.text_input("Nouveau service d'affectation", value="")
                     remarque = "Affectation suite à épuisement de reliquat"
                 else:
                     nouveau_service = st.text_input("Service affecté", value=nouveau_service)
-                    st.success(f"Reliquat disponible : {reliquat_actuel} jours")
+                    st.success(f"✅ Reliquat disponible : {reliquat_actuel} jours")
 
             # Bouton de validation
-            if st.form_submit_button("Enregistrer les modifications"):
-                # Mise à jour du DataFrame
+            if st.form_submit_button("💾 Enregistrer les modifications"):
+                # Localisation de la ligne dans le DataFrame d'origine
                 idx = df.index[df['matricule'].astype(str) == matricule_sel].tolist()[0]
                 
+                # Mise à jour des valeurs calculées
                 df.at[idx, 'date début congé'] = str(d_debut)
                 df.at[idx, 'date fin congé'] = str(d_fin)
                 df.at[idx, 'date reprise'] = str(date_reprise)
@@ -92,12 +87,15 @@ try:
                 df.at[idx, 'reliquat des congés'] = reliquat_actuel - duree
                 df.at[idx, 'service affecté'] = nouveau_service
                 
-                # Sauvegarde
-                conn.update(worksheet="Sheet1", data=df)
-                st.success("Mise à jour réussie !")
-                st.cache_data.clear()
-                st.rerun()
+                # Sauvegarde via la connexion Google Sheets
+                try:
+                    conn.update(worksheet="Sheet1", data=df)
+                    st.success(f"Mise à jour réussie pour {emp_row[col_nom]} !")
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as save_error:
+                    st.error(f"Erreur lors de la sauvegarde : {save_error}")
 
 except Exception as e:
-    st.error("Une erreur est survenue lors du chargement.")
-    st.exception(e) # Cela affichera l'erreur précise au lieu d'une page blanche
+    st.error("🚨 Une erreur est survenue lors du chargement des données.")
+    st.exception(e)
