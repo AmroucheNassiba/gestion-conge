@@ -393,14 +393,18 @@ with col_main:
             d_end = st.date_input(
                 "📅 Date de fin",
                 key=sk_end,
-                min_value=d_start   # fin toujours >= début, recalculé en direct
+                min_value=d_min     # contrainte fixe : >= plancher du slot seulement
             )
 
         # ── MÉTRIQUES : recalculées en direct à chaque changement de date ──
-        duree     = duree_inclusive(d_start, d_end)
+        # Alerte temps réel si fin < début (sans bloquer Streamlit)
+        if d_end < d_start:
+            st.error("⛔ La date de fin est antérieure à la date de début. Corrigez avant de continuer.")
+
+        duree     = duree_inclusive(d_start, d_end)   # retourne 0 si d_end < d_start
         reprise   = date_reprise(d_end)
         new_solde = round(solde - duree, 2)
-        depasse   = duree > solde
+        depasse   = duree > solde or d_end < d_start  # bloque aussi si dates incohérentes
 
         bc1, bc2, bc3 = st.columns(3)
         bc1.metric("⏱ Durée demandée",     f"{duree} j")
