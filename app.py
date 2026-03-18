@@ -3,61 +3,140 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime, timedelta
 
+# ══════════════════════════════════════════════
+#  CONFIG PAGE
+# ══════════════════════════════════════════════
 st.set_page_config(
-    page_title="Gestion des Congés",
+    page_title="Gestion des Congés RH",
     layout="wide",
-    page_icon="🗓️",
-    initial_sidebar_state="collapsed"
+    page_icon="🗓️"
 )
 
 st.markdown("""
 <style>
-    .stMetric { background: #f8f9fa; border-radius: 10px; padding: 10px; }
-    div[data-testid="metric-container"] { background:#f8f9fa; border-radius:10px; padding:10px; }
-    .badge-ok    { background:#d4edda; color:#155724; padding:3px 10px; border-radius:20px; font-size:12px; font-weight:600; }
-    .badge-warn  { background:#fff3cd; color:#856404; padding:3px 10px; border-radius:20px; font-size:12px; font-weight:600; }
-    .badge-danger{ background:#f8d7da; color:#721c24; padding:3px 10px; border-radius:20px; font-size:12px; font-weight:600; }
+    /* Cartes métriques */
+    div[data-testid="metric-container"] {
+        background: #f8f9fa;
+        border-radius: 10px;
+        padding: 12px 16px;
+        border: 1px solid #e9ecef;
+    }
+    /* Tableau historique */
+    .hist-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 6px 0;
+        border-bottom: 1px solid #f0f0f0;
+        font-size: 13px;
+    }
+    .hist-row:last-child { border-bottom: none; }
+    .tag-conge {
+        background: #d1ecf1; color: #0c5460;
+        padding: 2px 8px; border-radius: 12px;
+        font-size: 11px; font-weight: 600;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────
-# FONCTIONS UTILITAIRES
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  CONSTANTES — noms de colonnes Google Sheets
+# ══════════════════════════════════════════════
+COL_MAT      = "matricule"
+COL_NOM      = "nom"
+COL_SERVICE  = "service affecté"
+COL_RELIQUAT = "reliquat des congés"
+COL_MAJ      = "derniere_maj"
+# Préfixe pour les congés numérotés (congé 1, 2, 3…)
+# Chaque congé occupe 4 colonnes : debut, fin, duree, reprise
+CONGE_PREFIX = "conge"
 
-def calculate_leave_duration(d_start: datetime.date, d_end: datetime.date) -> int:
-    """
-    Calcule la durée INCLUSIVE du congé (le jour de fin compte).
-    Exemple : 01/03 → 03/03 = 3 jours
-    """
+
+# ══════════════════════════════════════════════
+#  FONCTIONS UTILITAIRES
+# ══════════════════════════════════════════════
+
+def duree_inclusive(d_start, d_end) -> int:
+    """Durée réelle : le jour de début ET de fin comptent."""
     if d_end < d_start:
         return 0
     return (d_end - d_start).days + 1
 
 
-def get_reprise(d_end: datetime.date) -> datetime.date:
-    return d_end + timedelta(days=1)
-
-
-def get_status(reliquat: float):
-    if reliquat <= 0:
-        return "🔴 Épuisé", "danger"
-    elif reliquat < 5:
-        return "🟠 Critique", "warn"
-    return "🟢 OK", "ok"
+def date_reprise(d_end) -> str:
+    return (d_end + timedelta(days=1)).strftime("%d/%m/%Y")
 
 
 def safe_float(val, default=0.0) -> float:
     try:
-        return float(val)
+        f = float(val)
+        return f if not pd.isna(f) else default
     except (ValueError, TypeError):
         return default
 
 
-# ─────────────────────────────────────────────
-# CHARGEMENT DES DONNÉES
-# ─────────────────────────────────────────────
+def get_status(reliquat: float):
+    """Retourne (label, couleur_streamlit)"""
+    if reliquat <= 0:
+        return "🔴 Reliquat épuisé", "error"
+    elif reliquat < 5:
+        return "🟠 Solde critique", "warning"
+    return "🟢 Solde disponible", "success"
 
+
+def prochain_slot_conge(row: pd.Series) -> int:
+    """
+    Cherche le prochain numéro de congé libre pour cet employé.
+    Ex : si conge1_debut et conge2_debut existent → retourne 3.
+    """
+    i = 1
+    while True:
+        col = f"{CONGE_PREFIX}{i}_debut"
+        if col not in row.index:
+            return i          # colonne pas encore créée du tout
+        val = row.get(col, "")
+        if pd.isna(val) or str(val).strip() == "":
+            return i          # slot vide trouvé
+        i += 1
+
+
+def historique_conges(row: pd.Series) -> list[dict]:
+    """Retourne la liste des congés déjà enregistrés pour un employé."""
+    hist = []
+    i = 1
+    while True:
+        col_debut = f"{CONGE_PREFIX}{i}_debut"
+        if col_debut not in row.index:
+            break
+        debut = row.get(col_debut, "")
+        if pd.isna(debut) or str(debut).strip() == "":
+            break
+        hist.append({
+            "n":       i,
+            "debut":   str(row.get(f"{CONGE_PREFIX}{i}_debut",  "")).strip(),
+            "fin":     str(row.get(f"{CONGE_PREFIX}{i}_fin",    "")).strip(),
+            "duree":   str(row.get(f"{CONGE_PREFIX}{i}_duree",  "")).strip(),
+            "reprise": str(row.get(f"{CONGE_PREFIX}{i}_reprise","")).strip(),
+        })
+        i += 1
+    return hist
+
+
+def assurer_colonnes(df: pd.DataFrame, slot: int) -> pd.DataFrame:
+    """
+    S'assure que les colonnes congeN_debut/fin/duree/reprise existent.
+    Si non, les crée avec des chaînes vides.
+    """
+    for suffix in ["_debut", "_fin", "_duree", "_reprise"]:
+        col = f"{CONGE_PREFIX}{slot}{suffix}"
+        if col not in df.columns:
+            df[col] = ""
+    return df
+
+
+# ══════════════════════════════════════════════
+#  CONNEXION GOOGLE SHEETS
+# ══════════════════════════════════════════════
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
 except Exception as e:
@@ -69,250 +148,362 @@ except Exception as e:
 def load_data() -> pd.DataFrame:
     data = conn.read(worksheet="Sheet1", ttl=0)
     data.columns = [str(c).strip().lower() for c in data.columns]
-    # Normalisation du reliquat
-    rel_col = "reliquat des congés"
-    if rel_col in data.columns:
-        data[rel_col] = pd.to_numeric(data[rel_col], errors="coerce").fillna(0)
+    if COL_RELIQUAT in data.columns:
+        data[COL_RELIQUAT] = pd.to_numeric(data[COL_RELIQUAT], errors="coerce").fillna(0)
     return data
 
 
 df = load_data()
 
-# Colonnes attendues (minuscules)
-COL_NOM       = "nom"
-COL_MAT       = "matricule"
-COL_SERVICE   = "service affecté"
-COL_RELIQUAT  = "reliquat des congés"
-COL_DEBUT     = "date début congé"
-COL_FIN       = "date fin congé"
-COL_REPRISE   = "date reprise"
-COL_DUREE     = "durrée"          # gardé tel quel pour compatibilité
-COL_REMARQUE  = "remarque"
-COL_MAJ       = "derniere_maj"
 
-
-# ─────────────────────────────────────────────
-# EN-TÊTE
-# ─────────────────────────────────────────────
-
+# ══════════════════════════════════════════════
+#  EN-TÊTE
+# ══════════════════════════════════════════════
 st.title("🗓️ Gestion des Congés — Ressources Humaines")
-st.caption(f"Mise à jour : {datetime.now().strftime('%d/%m/%Y à %H:%M')}")
-
+st.caption(f"📅 {datetime.now().strftime('%A %d %B %Y, %H:%M')}")
 st.divider()
 
-# ─────────────────────────────────────────────
-# TABLEAU DE BORD (métriques globales)
-# ─────────────────────────────────────────────
 
+# ══════════════════════════════════════════════
+#  MÉTRIQUES GLOBALES
+# ══════════════════════════════════════════════
 if COL_RELIQUAT in df.columns:
-    total_emp    = len(df)
-    epuises      = int((df[COL_RELIQUAT] <= 0).sum())
-    critiques    = int(((df[COL_RELIQUAT] > 0) & (df[COL_RELIQUAT] < 5)).sum())
-    solde_moyen  = round(df[COL_RELIQUAT].mean(), 1)
+    total     = len(df)
+    epuises   = int((df[COL_RELIQUAT] <= 0).sum())
+    critiques = int(((df[COL_RELIQUAT] > 0) & (df[COL_RELIQUAT] < 5)).sum())
+    moy       = round(df[COL_RELIQUAT].mean(), 1)
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("👥 Total employés",        total_emp)
-    m2.metric("🔴 Reliquats épuisés",     epuises,  delta=f"-{epuises}" if epuises else None, delta_color="inverse")
-    m3.metric("🟠 Soldes critiques (<5j)", critiques)
-    m4.metric("📊 Solde moyen",           f"{solde_moyen} j")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("👥 Total employés",         total)
+    c2.metric("🔴 Reliquats épuisés",       epuises)
+    c3.metric("🟠 Soldes critiques (< 5j)", critiques)
+    c4.metric("📊 Solde moyen",             f"{moy} j")
+    st.divider()
 
-st.divider()
 
-# ─────────────────────────────────────────────
-# LISTE DES EMPLOYÉS AVEC FILTRES
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  TABLEAU DES EMPLOYÉS AVEC FILTRES
+# ══════════════════════════════════════════════
+with st.expander("📋 Vue d'ensemble — Tous les employés", expanded=False):
+    fa, fb = st.columns([2, 1])
+    with fa:
+        search = st.text_input("🔍 Nom ou matricule", placeholder="ex: Karim, 1042…")
+    with fb:
+        filtre = st.selectbox("Statut", ["Tous", "🟢 OK (≥5j)", "🟠 Critique (<5j)", "🔴 Épuisé"])
 
-with st.expander("📋 Vue d'ensemble — Tous les employés", expanded=True):
-
-    col_f1, col_f2 = st.columns([2, 1])
-
-    with col_f1:
-        search = st.text_input("🔍 Rechercher (nom ou matricule)", placeholder="ex: Karim ou 1042")
-
-    with col_f2:
-        filtre_statut = st.selectbox("Filtrer par statut", ["Tous", "🟢 OK", "🟠 Critique", "🔴 Épuisé"])
-
-    df_view = df.copy()
-
-    # Filtre texte
+    dv = df.copy()
     if search.strip():
-        mask = (
-            df_view[COL_NOM].astype(str).str.contains(search, case=False, na=False)
-            | df_view[COL_MAT].astype(str).str.contains(search, case=False, na=False)
+        m = (
+            dv[COL_NOM].astype(str).str.contains(search, case=False, na=False)
+            | dv[COL_MAT].astype(str).str.contains(search, case=False, na=False)
         )
-        df_view = df_view[mask]
+        dv = dv[m]
+    if filtre == "🟢 OK (≥5j)":
+        dv = dv[dv[COL_RELIQUAT] >= 5]
+    elif filtre == "🟠 Critique (<5j)":
+        dv = dv[(dv[COL_RELIQUAT] > 0) & (dv[COL_RELIQUAT] < 5)]
+    elif filtre == "🔴 Épuisé":
+        dv = dv[dv[COL_RELIQUAT] <= 0]
 
-    # Filtre statut
-    if filtre_statut == "🟢 OK":
-        df_view = df_view[df_view[COL_RELIQUAT] >= 5]
-    elif filtre_statut == "🟠 Critique":
-        df_view = df_view[(df_view[COL_RELIQUAT] > 0) & (df_view[COL_RELIQUAT] < 5)]
-    elif filtre_statut == "🔴 Épuisé":
-        df_view = df_view[df_view[COL_RELIQUAT] <= 0]
-
-    # Affichage stylé
-    if not df_view.empty:
-        affichage = df_view[[COL_MAT, COL_NOM, COL_SERVICE, COL_RELIQUAT]].copy()
-        affichage.columns = ["Matricule", "Nom", "Service", "Reliquat (j)"]
-        affichage["Statut"] = affichage["Reliquat (j)"].apply(
+    cols_affich = [c for c in [COL_MAT, COL_NOM, COL_SERVICE, COL_RELIQUAT] if c in dv.columns]
+    aff = dv[cols_affich].copy()
+    aff.columns = ["Matricule", "Nom", "Service", "Reliquat (j)"][:len(cols_affich)]
+    if "Reliquat (j)" in aff.columns:
+        aff["Statut"] = aff["Reliquat (j)"].apply(
             lambda r: "🟢 OK" if r >= 5 else ("🟠 Critique" if r > 0 else "🔴 Épuisé")
         )
-        st.dataframe(affichage, use_container_width=True, hide_index=True)
-    else:
-        st.info("Aucun employé ne correspond à la recherche.")
+    st.dataframe(aff, use_container_width=True, hide_index=True)
 
 st.divider()
 
-# ─────────────────────────────────────────────
-# FORMULAIRE D'AFFECTATION
-# ─────────────────────────────────────────────
 
-st.subheader("📝 Affecter un congé")
+# ══════════════════════════════════════════════
+#  SÉLECTION EMPLOYÉ
+# ══════════════════════════════════════════════
+st.subheader("📝 Gestion du dossier employé")
 
-# Sélection employé
-noms       = df[COL_NOM].tolist()
-matricules = df[COL_MAT].astype(str).tolist()
-options    = ["— Sélectionner un employé —"] + [f"{m}  ·  {n}" for m, n in zip(matricules, noms)]
+options_emp = ["— Sélectionner un employé —"] + [
+    f"{m}  ·  {n}"
+    for m, n in zip(df[COL_MAT].astype(str).tolist(), df[COL_NOM].tolist())
+]
+selection = st.selectbox("Collaborateur", options=options_emp)
 
-selection = st.selectbox("Collaborateur", options=options)
+if selection == "— Sélectionner un employé —":
+    st.info("👆 Sélectionnez un employé pour gérer son dossier congé.")
+    st.stop()
 
-if selection and selection != "— Sélectionner un employé —":
-    m_id     = selection.split("·")[0].strip()
-    emp_mask = df[COL_MAT].astype(str) == m_id
+# ── Récupération des données de l'employé ──
+m_id     = selection.split("·")[0].strip()
+emp_mask = df[COL_MAT].astype(str) == m_id
+if emp_mask.sum() == 0:
+    st.error("Employé introuvable dans la base.")
+    st.stop()
 
-    if emp_mask.sum() == 0:
-        st.error("Employé introuvable.")
-        st.stop()
+emp    = df[emp_mask].iloc[0]
+idx    = df.index[emp_mask][0]
+solde  = safe_float(emp.get(COL_RELIQUAT, 0))
+label, badge = get_status(solde)
+solde_epuise = solde <= 0
 
-    emp     = df[emp_mask].iloc[0]
-    idx     = df.index[emp_mask][0]
-    solde   = safe_float(emp.get(COL_RELIQUAT, 0))
-    label, badge_type = get_status(solde)
+st.divider()
 
-    # Colonnes : formulaire | résumé
-    col_form, col_side = st.columns([3, 1])
+# ══════════════════════════════════════════════
+#  MISE EN PAGE : FORMULAIRE | PANNEAU LATÉRAL
+# ══════════════════════════════════════════════
+col_main, col_side = st.columns([3, 1], gap="large")
 
-    with col_form:
-        st.markdown(f"### {emp[COL_NOM]}")
-        st.markdown(f"**Matricule :** `{m_id}` &nbsp;|&nbsp; **Service :** {emp.get(COL_SERVICE, 'N/A')}")
+# ────────────────────────────
+#  COLONNE PRINCIPALE
+# ────────────────────────────
+with col_main:
 
-        if badge_type == "danger":
-            st.error(f"⚠️ Solde épuisé. Ce dossier nécessite une réaffectation de service.")
-        elif badge_type == "warn":
-            st.warning(f"🟠 Solde critique : **{solde} jour(s)** restant(s).")
-        else:
-            st.success(f"🟢 Solde disponible : **{solde} jour(s)**")
+    # Fiche identité
+    st.markdown(f"### {emp[COL_NOM]}")
+    st.markdown(
+        f"**Matricule :** `{m_id}`  &nbsp;|&nbsp;  "
+        f"**Service actuel :** {emp.get(COL_SERVICE, 'N/A')}  &nbsp;|&nbsp;  "
+        f"**Reliquat :** {solde} j"
+    )
 
-        with st.form("affectation_form", clear_on_submit=False):
+    # Bandeau de statut
+    if badge == "error":
+        st.error(f"{label} — Le formulaire de congé est désactivé. Choisissez une action ci-dessous.")
+    elif badge == "warning":
+        st.warning(f"{label} — Il reste seulement {solde} jour(s). Le système bloquera si la durée demandée dépasse ce solde.")
+    else:
+        st.success(f"{label} — {solde} jour(s) disponibles.")
 
-            f1, f2 = st.columns(2)
-            with f1:
-                d_start = st.date_input("📅 Date de début", value=datetime.today().date())
-            with f2:
-                d_end   = st.date_input("📅 Date de fin",   value=(datetime.today() + timedelta(days=1)).date())
+    st.markdown("---")
 
-            # Calcul en temps réel
-            duree   = calculate_leave_duration(d_start, d_end)
-            reprise = get_reprise(d_end)
-            nouveau_solde = round(solde - duree, 2)
+    # ══════════════════════════════
+    #  CAS 1 : RELIQUAT ÉPUISÉ
+    # ══════════════════════════════
+    if solde_epuise:
+        st.markdown("#### 🔀 Action — Reliquat épuisé")
+        st.markdown(
+            "Le solde de congés de cet employé est **nul**. "
+            "Vous pouvez soit le **maintenir dans son service actuel**, "
+            "soit le **réaffecter à un autre service**."
+        )
 
-            st.markdown(
-                f"**Durée calculée :** `{duree}` jour(s) &nbsp;|&nbsp; "
-                f"**Date de reprise :** `{reprise.strftime('%d/%m/%Y')}`"
+        with st.form("form_epuise"):
+            choix = st.radio(
+                "Que souhaitez-vous faire ?",
+                options=[
+                    "✅ Maintenir dans le service actuel",
+                    "🔀 Réaffecter à un autre service",
+                ],
+                horizontal=True
             )
 
-            # Avertissement si dépassement
-            if duree > solde and solde > 0:
-                st.warning(f"⚠️ La durée demandée ({duree}j) dépasse le solde disponible ({solde}j). "
-                           f"Ajustez les dates ou procédez en plusieurs congés.")
-            elif nouveau_solde < 0 and solde <= 0:
-                pass  # géré par le bloc épuisé plus haut
+            nouveau_service = ""
+            if choix == "🔀 Réaffecter à un autre service":
+                nouveau_service = st.text_input(
+                    "Nouveau service",
+                    placeholder="Ex: Production, Maintenance, Administration…"
+                )
 
-            f3, f4 = st.columns(2)
-            with f3:
-                if badge_type == "danger":
-                    target_service = st.text_input(
-                        "🔀 Nouveau service (obligatoire)",
-                        placeholder="Ex: Production, Maintenance…"
-                    )
+            remarque = st.text_input(
+                "Remarque / Note interne",
+                placeholder="Motif de la décision…"
+            )
+
+            confirmer = st.form_submit_button("✅ Enregistrer la décision", use_container_width=True)
+
+            if confirmer:
+                if choix == "🔀 Réaffecter à un autre service" and not nouveau_service.strip():
+                    st.error("❌ Veuillez saisir le nom du nouveau service.")
                 else:
-                    target_service = st.text_input(
-                        "🏢 Service affecté",
-                        value=str(emp.get(COL_SERVICE, ""))
-                    )
+                    service_final = nouveau_service.strip() if choix == "🔀 Réaffecter à un autre service" else emp.get(COL_SERVICE, "")
+                    note_auto     = f"Décision solde épuisé : {choix.replace('✅ ','').replace('🔀 ','')}."
+                    note_finale   = f"{note_auto} {remarque}".strip()
 
-            with f4:
-                remarque = st.text_input("📌 Remarque / Note interne", value="")
+                    df.at[idx, COL_SERVICE] = service_final
+                    df.at[idx, COL_MAJ]     = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    # On ajoute la remarque dans la dernière colonne historique remarque si elle existe
+                    # sinon on crée une colonne dédiée
+                    if "remarque_epuisement" not in df.columns:
+                        df["remarque_epuisement"] = ""
+                    df.at[idx, "remarque_epuisement"] = note_finale
 
-            submitted = st.form_submit_button("✅ Confirmer l'affectation", use_container_width=True)
+                    with st.spinner("🔄 Synchronisation…"):
+                        try:
+                            conn.update(worksheet="Sheet1", data=df)
+                            st.cache_data.clear()
+                            action_msg = (
+                                f"réaffecté au service **{service_final}**"
+                                if choix == "🔀 Réaffecter à un autre service"
+                                else f"maintenu dans le service **{service_final}**"
+                            )
+                            st.success(f"✅ **{emp[COL_NOM]}** a été {action_msg}.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Erreur de sauvegarde : {e}")
 
-            if submitted:
-                # Validations
+    # ══════════════════════════════
+    #  CAS 2 : RELIQUAT DISPONIBLE
+    # ══════════════════════════════
+    else:
+        # Calcul du slot disponible
+        slot = prochain_slot_conge(emp)
+        st.markdown(f"#### 📅 Affecter le congé n°{slot}")
+
+        with st.form("form_conge"):
+            fa, fb = st.columns(2)
+            with fa:
+                d_start = st.date_input(
+                    "📅 Date de début",
+                    value=datetime.today().date(),
+                    min_value=datetime.today().date()
+                )
+            with fb:
+                d_end = st.date_input(
+                    "📅 Date de fin",
+                    value=datetime.today().date() + timedelta(days=1),
+                    min_value=datetime.today().date()
+                )
+
+            # ── Analyse intelligente en temps réel ──
+            duree      = duree_inclusive(d_start, d_end)
+            reprise    = date_reprise(d_end)
+            new_solde  = round(solde - duree, 2)
+            depasse    = duree > solde
+
+            # Bandeau d'analyse
+            bc1, bc2, bc3 = st.columns(3)
+            bc1.metric("⏱ Durée demandée",      f"{duree} j")
+            bc2.metric("📅 Date de reprise",      reprise)
+            bc3.metric(
+                "📊 Solde après validation",
+                f"{max(0, new_solde)} j",
+                delta=f"-{duree}" if not depasse else None,
+                delta_color="inverse"
+            )
+
+            if depasse:
+                st.error(
+                    f"⛔ Durée demandée ({duree}j) **supérieure** au reliquat disponible ({solde}j). "
+                    f"Réduisez la période ou fractionnez en {int(solde)}j maintenant + retour pour la suite."
+                )
+            elif new_solde == 0:
+                st.warning(
+                    f"⚠️ Ce congé **épuisera entièrement** le reliquat. "
+                    "À la reprise, l'employé sera soumis à la procédure de réaffectation."
+                )
+            elif new_solde < 5:
+                st.info(f"ℹ️ Après ce congé, le reliquat sera critique : **{new_solde}j**.")
+
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                service = st.text_input(
+                    "🏢 Service affecté",
+                    value=str(emp.get(COL_SERVICE, ""))
+                )
+            with fc2:
+                remarque = st.text_input(
+                    "📌 Remarque",
+                    placeholder="Note interne facultative…"
+                )
+
+            confirmer = st.form_submit_button(
+                "✅ Confirmer l'affectation",
+                use_container_width=True,
+                disabled=depasse   # ← bouton désactivé si dépassement
+            )
+
+            if confirmer and not depasse:
                 errors = []
-
                 if d_end < d_start:
                     errors.append("La date de fin est antérieure à la date de début.")
 
-                if badge_type == "danger" and not target_service.strip():
-                    errors.append("Le changement de service est obligatoire pour les soldes épuisés.")
-
-                if duree > solde and solde > 0:
-                    errors.append(
-                        f"Durée demandée ({duree}j) supérieure au reliquat ({solde}j). "
-                        "Réduisez la durée du congé."
-                    )
-
                 if errors:
-                    for err in errors:
-                        st.error(f"❌ {err}")
+                    for e in errors:
+                        st.error(f"❌ {e}")
                 else:
-                    # Mise à jour du DataFrame
-                    df.at[idx, COL_DEBUT]    = d_start.strftime("%Y-%m-%d")
-                    df.at[idx, COL_FIN]      = d_end.strftime("%Y-%m-%d")
-                    df.at[idx, COL_REPRISE]  = reprise.strftime("%Y-%m-%d")
-                    df.at[idx, COL_DUREE]    = duree
-                    df.at[idx, COL_RELIQUAT] = max(0, nouveau_solde)
-                    df.at[idx, COL_SERVICE]  = target_service.strip() if target_service.strip() else emp.get(COL_SERVICE, "")
-                    df.at[idx, COL_REMARQUE] = remarque if remarque else (
-                        "RÉAFFECTATION : Solde épuisé." if badge_type == "danger" else ""
-                    )
+                    # ── Écriture dans les colonnes historiques ──
+                    df = assurer_colonnes(df, slot)
+
+                    df.at[idx, f"{CONGE_PREFIX}{slot}_debut"]   = d_start.strftime("%Y-%m-%d")
+                    df.at[idx, f"{CONGE_PREFIX}{slot}_fin"]     = d_end.strftime("%Y-%m-%d")
+                    df.at[idx, f"{CONGE_PREFIX}{slot}_duree"]   = duree
+                    df.at[idx, f"{CONGE_PREFIX}{slot}_reprise"] = (d_end + timedelta(days=1)).strftime("%Y-%m-%d")
+
+                    # ── Mise à jour du reliquat et du service ──
+                    df.at[idx, COL_RELIQUAT] = max(0, new_solde)
+                    df.at[idx, COL_SERVICE]  = service.strip() if service.strip() else emp.get(COL_SERVICE, "")
                     df.at[idx, COL_MAJ]      = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+                    # Remarque optionnelle
+                    if "remarque" not in df.columns:
+                        df["remarque"] = ""
+                    df.at[idx, "remarque"] = remarque
 
                     with st.spinner("🔄 Synchronisation avec Google Sheets…"):
                         try:
                             conn.update(worksheet="Sheet1", data=df)
                             st.cache_data.clear()
                             st.success(
-                                f"✅ Dossier de **{emp[COL_NOM]}** mis à jour. "
-                                f"Nouveau solde : **{max(0, nouveau_solde)} jour(s)**"
+                                f"✅ Congé n°{slot} de **{emp[COL_NOM]}** enregistré. "
+                                f"Période : {d_start.strftime('%d/%m/%Y')} → {d_end.strftime('%d/%m/%Y')} "
+                                f"({duree}j). Nouveau solde : **{max(0, new_solde)}j**."
                             )
                             st.rerun()
                         except Exception as e:
-                            st.error(f"❌ Erreur lors de la sauvegarde : {e}")
+                            st.error(f"❌ Erreur de sauvegarde : {e}")
 
-    # ── Panneau résumé latéral ──
-    with col_side:
-        st.markdown("#### Résumé")
-        st.metric("Solde actuel",   f"{solde} j")
-        duree_preview = calculate_leave_duration(
-            datetime.today().date(),
-            datetime.today().date() + timedelta(days=1)
+
+# ────────────────────────────
+#  COLONNE LATÉRALE : historique + résumé
+# ────────────────────────────
+with col_side:
+
+    # Résumé solde
+    st.markdown("#### Solde")
+    if solde_epuise:
+        st.error(f"**0 j** — Épuisé")
+    elif solde < 5:
+        st.warning(f"**{solde} j** — Critique")
+    else:
+        st.success(f"**{solde} j** disponibles")
+
+    st.markdown("---")
+
+    # Historique des congés
+    st.markdown("#### Historique des congés")
+    hist = historique_conges(emp)
+
+    if not hist:
+        st.caption("Aucun congé enregistré pour cet employé.")
+    else:
+        for h in hist:
+            with st.container():
+                st.markdown(
+                    f"<div class='hist-row'>"
+                    f"<span class='tag-conge'>Congé {h['n']}</span>"
+                    f"<span style='font-size:11px;color:#555'>{h['debut']} → {h['fin']}</span>"
+                    f"</div>"
+                    f"<div style='font-size:11px;color:#888;padding:2px 0 6px 8px'>"
+                    f"Durée : <b>{h['duree']}j</b> · Reprise : {h['reprise']}"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+
+    st.markdown("---")
+
+    # Simulation rapide
+    if not solde_epuise:
+        st.markdown("#### Simulation")
+        sim_j = st.number_input(
+            "Simuler N jours",
+            min_value=1,
+            max_value=int(max(solde, 1)),
+            value=min(int(solde), 10),
+            step=1
         )
-        # Recalcul avec valeurs du formulaire (approximation)
-        st.metric("Après congé",    f"{max(0, round(solde - duree, 2))} j", delta=-duree)
-
-        st.divider()
-
-        st.markdown("**Historique récent**")
-        hist_cols = [COL_DEBUT, COL_FIN, COL_DUREE]
-        if all(c in emp.index for c in hist_cols):
-            debut_val  = emp.get(COL_DEBUT, "")
-            fin_val    = emp.get(COL_FIN, "")
-            duree_val  = emp.get(COL_DUREE, "")
-            if debut_val and str(debut_val).strip():
-                st.caption(f"Dernier congé : {debut_val} → {fin_val} ({duree_val}j)")
-            else:
-                st.caption("Aucun congé enregistré.")
-
-else:
-    st.info("Sélectionnez un employé pour commencer l'affectation.")
+        sim_solde = round(solde - sim_j, 1)
+        if sim_solde > 0:
+            st.caption(f"Après {sim_j}j → **{sim_solde}j** restants.")
+        elif sim_solde == 0:
+            st.caption(f"Après {sim_j}j → solde **épuisé**.")
+        else:
+            st.caption(f"⛔ {sim_j}j dépasse le solde disponible.")
