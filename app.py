@@ -122,6 +122,24 @@ def historique_conges(row: pd.Series) -> list[dict]:
     return hist
 
 
+def date_min_prochain_conge(row: pd.Series, slot: int):
+    """
+    Retourne la date minimale autorisée pour le début du congé N.
+    = date de reprise du congé N-1 (l'employé doit être revenu avant de repartir).
+    Si c'est le 1er congé, pas de contrainte → retourne aujourd'hui.
+    """
+    if slot <= 1:
+        return datetime.today().date()
+    col_reprise_precedente = f"{CONGE_PREFIX}{slot - 1}_reprise"
+    val = row.get(col_reprise_precedente, "")
+    if pd.isna(val) or str(val).strip() == "":
+        return datetime.today().date()
+    try:
+        return datetime.strptime(str(val).strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return datetime.today().date()
+
+
 def assurer_colonnes(df: pd.DataFrame, slot: int) -> pd.DataFrame:
     """
     S'assure que les colonnes congeN_debut/fin/duree/reprise existent.
@@ -344,55 +362,71 @@ with col_main:
     #  CAS 2 : RELIQUAT DISPONIBLE
     # ══════════════════════════════
     else:
-        # Calcul du slot disponible
-        slot = prochain_slot_conge(emp)
+        slot  = prochain_slot_conge(emp)
+        d_min = date_min_prochain_conge(emp, slot)
         st.markdown(f"#### 📅 Affecter le congé n°{slot}")
 
-        with st.form("form_conge"):
-            fa, fb = st.columns(2)
-            with fa:
-                d_start = st.date_input(
-                    "📅 Date de début",
-                    value=datetime.today().date(),
-                    min_value=datetime.today().date()
-                )
-            with fb:
-                d_end = st.date_input(
-                    "📅 Date de fin",
-                    value=datetime.today().date() + timedelta(days=1),
-                    min_value=datetime.today().date()
-                )
-
-            # ── Analyse intelligente en temps réel ──
-            duree      = duree_inclusive(d_start, d_end)
-            reprise    = date_reprise(d_end)
-            new_solde  = round(solde - duree, 2)
-            depasse    = duree > solde
-
-            # Bandeau d'analyse
-            bc1, bc2, bc3 = st.columns(3)
-            bc1.metric("⏱ Durée demandée",      f"{duree} j")
-            bc2.metric("📅 Date de reprise",      reprise)
-            bc3.metric(
-                "📊 Solde après validation",
-                f"{max(0, new_solde)} j",
-                delta=f"-{duree}" if not depasse else None,
-                delta_color="inverse"
+        if slot > 1:
+            st.info(
+                f"📌 Congé précédent (n°{slot-1}) : reprise le **{d_min.strftime('%d/%m/%Y')}**. "
+                f"Le congé n°{slot} ne peut pas commencer avant cette date."
             )
 
-            if depasse:
-                st.error(
-                    f"⛔ Durée demandée ({duree}j) **supérieure** au reliquat disponible ({solde}j). "
-                    f"Réduisez la période ou fractionnez en {int(solde)}j maintenant + retour pour la suite."
-                )
-            elif new_solde == 0:
-                st.warning(
-                    f"⚠️ Ce congé **épuisera entièrement** le reliquat. "
-                    "À la reprise, l'employé sera soumis à la procédure de réaffectation."
-                )
-            elif new_solde < 5:
-                st.info(f"ℹ️ Après ce congé, le reliquat sera critique : **{new_solde}j**.")
+        # ── DATES : HORS du st.form → mise à jour immédiate à chaque changement ──
+        sk_start = f"d_start_{m_id}"
+        sk_end   = f"d_end_{m_id}"
 
+        # Initialisation session_state si premier affichage ou changement d'employé
+        if sk_start not in st.session_state or st.session_state[sk_start] < d_min:
+            st.session_state[sk_start] = d_min
+        if sk_end not in st.session_state or st.session_state[sk_end] <= st.session_state[sk_start]:
+            st.session_state[sk_end] = d_min + timedelta(days=1)
+
+        fa, fb = st.columns(2)
+        with fa:
+            d_start = st.date_input(
+                "📅 Date de début",
+                key=sk_start,
+                min_value=d_min
+            )
+        with fb:
+            d_end = st.date_input(
+                "📅 Date de fin",
+                key=sk_end,
+                min_value=d_start   # fin toujours >= début, recalculé en direct
+            )
+
+        # ── MÉTRIQUES : recalculées en direct à chaque changement de date ──
+        duree     = duree_inclusive(d_start, d_end)
+        reprise   = date_reprise(d_end)
+        new_solde = round(solde - duree, 2)
+        depasse   = duree > solde
+
+        bc1, bc2, bc3 = st.columns(3)
+        bc1.metric("⏱ Durée demandée",     f"{duree} j")
+        bc2.metric("📅 Date de reprise",     reprise)
+        bc3.metric(
+            "📊 Solde après validation",
+            f"{max(0, new_solde)} j",
+            delta=f"-{duree}" if not depasse else None,
+            delta_color="inverse"
+        )
+
+        if depasse:
+            st.error(
+                f"⛔ Durée demandée ({duree}j) **supérieure** au reliquat disponible ({solde}j). "
+                f"Réduisez la période ou fractionnez en **{int(solde)}j** maintenant + retour pour la suite."
+            )
+        elif new_solde == 0:
+            st.warning(
+                "⚠️ Ce congé **épuisera entièrement** le reliquat. "
+                "À la reprise, l'employé sera soumis à la procédure de réaffectation."
+            )
+        elif new_solde < 5:
+            st.info(f"ℹ️ Après ce congé, le reliquat sera critique : **{new_solde}j**.")
+
+        # ── FORMULAIRE : uniquement service, remarque et bouton confirmer ──
+        with st.form("form_conge"):
             fc1, fc2 = st.columns(2)
             with fc1:
                 service = st.text_input(
@@ -408,32 +442,31 @@ with col_main:
             confirmer = st.form_submit_button(
                 "✅ Confirmer l'affectation",
                 use_container_width=True,
-                disabled=depasse   # ← bouton désactivé si dépassement
+                disabled=depasse    # bouton grisé si dépassement
             )
 
             if confirmer and not depasse:
                 errors = []
                 if d_end < d_start:
                     errors.append("La date de fin est antérieure à la date de début.")
-
+                if d_start < d_min:
+                    errors.append(
+                        f"La date de début ({d_start.strftime('%d/%m/%Y')}) est antérieure "
+                        f"à la date de reprise du congé précédent ({d_min.strftime('%d/%m/%Y')}). "
+                        "L'employé doit reprendre avant de repartir."
+                    )
                 if errors:
                     for e in errors:
                         st.error(f"❌ {e}")
                 else:
-                    # ── Écriture dans les colonnes historiques ──
                     df = assurer_colonnes(df, slot)
-
                     df.at[idx, f"{CONGE_PREFIX}{slot}_debut"]   = d_start.strftime("%Y-%m-%d")
                     df.at[idx, f"{CONGE_PREFIX}{slot}_fin"]     = d_end.strftime("%Y-%m-%d")
                     df.at[idx, f"{CONGE_PREFIX}{slot}_duree"]   = duree
                     df.at[idx, f"{CONGE_PREFIX}{slot}_reprise"] = (d_end + timedelta(days=1)).strftime("%Y-%m-%d")
-
-                    # ── Mise à jour du reliquat et du service ──
                     df.at[idx, COL_RELIQUAT] = max(0, new_solde)
                     df.at[idx, COL_SERVICE]  = service.strip() if service.strip() else emp.get(COL_SERVICE, "")
                     df.at[idx, COL_MAJ]      = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-                    # Remarque optionnelle
                     if "remarque" not in df.columns:
                         df["remarque"] = ""
                     df.at[idx, "remarque"] = remarque
